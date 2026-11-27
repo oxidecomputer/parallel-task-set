@@ -79,9 +79,12 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// once all tasks have been spawned.
     ///
     /// [`join_next()`]: Self::join_next
-    #[must_use = "ParallelTaskSet::spawn returns a task output once \
-        `max_parallelism` tasks are spawned"]
-    pub async fn spawn<F>(&mut self, future: F) -> JoinedTasks<'_, T>
+    /// [`join_remaining()`]: Self::join_remaining
+    #[must_use = "`ParallelTaskSet::spawn` returns the outputs of completed \
+        tasks, which will not be returned again by `join_next()` or \
+        `join_remaining()`. outputs are, therefore, lost if the returned \
+        iterator is not consumed."]
+    pub async fn spawn<F>(&mut self, future: F) -> CompletedTasks<'_, T>
     where
         F: Future<Output = T> + Send + 'static,
     {
@@ -127,7 +130,7 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
             (permit, output)
         });
 
-        JoinedTasks { next: output, set: self }
+        CompletedTasks { next: output, set: self }
     }
 
     /// Waits for the next task to complete and return its output.
@@ -186,15 +189,15 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     }
 }
 
-#[must_use = "dropping a `JoinedTasks` without consuming the output of the \
-    completed tasks will reduce the available capacity of the task set until \
-    those tasks' output is consumed"]
-pub struct JoinedTasks<'set, T> {
+#[must_use = "dropping a `CompletedTasks` without consuming it may discard \
+    the output of a task that had to be awaited to free capacity for a new one \
+    to be spawned"]
+pub struct CompletedTasks<'set, T> {
     next: Option<T>,
     set: &'set mut ParallelTaskSet<T>,
 }
 
-impl<'set, T> JoinedTasks<'set, T>
+impl<'set, T> CompletedTasks<'set, T>
 where
     T: Send + 'static,
 {
@@ -210,7 +213,7 @@ where
     }
 }
 
-impl<'set, T> Iterator for JoinedTasks<'set, T>
+impl<'set, T> Iterator for CompletedTasks<'set, T>
 where
     T: Send + 'static,
 {
