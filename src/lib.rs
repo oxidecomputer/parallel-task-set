@@ -5,6 +5,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::task::JoinError;
 use tokio::task::JoinSet;
 
 /// The default number of parallel tasks used by [ParallelTaskSet].
@@ -174,42 +175,39 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     where
         F: Future<Output = T> + Send + 'static,
     {
-        let (permit, output) =
-            match Arc::clone(&self.semaphore).try_acquire_owned() {
-                Ok(permit) => (permit, None),
-                Err(TryAcquireError::Closed) => {
-                    unreachable!("we never close the semaphore")
-                }
-                Err(TryAcquireError::NoPermits) => {
-                    let joined = self
-                        .set
-                        .join_next()
-                        .await
-                        .transpose()
-                        .expect("Failed to join task");
-                    match joined {
-                        // If another task has completed, let's reuse its
-                        // permit, avoiding a few atomic operations (to drop the
-                        // permit, which increments the semaphore's permit count
-                        // and decrements the `Arc<Semaphore>`'s ref count, and
-                        // then to acquire a new permit, which does the
-                        // inverse...).
-                        Some((permit, output)) => (permit, Some(output)),
-                        // It would be strange to end up here: the call to
-                        // `try_acquire_owned()` should not return `NoPermits`
-                        // unless there was a joined task to consume, but
-                        // somehow, there wasn't one. Nonetheless, let's handle
-                        // that gracefully by acquiring a new one.
-                        None => {
-                            let permit = Arc::clone(&self.semaphore)
-                                .acquire_owned()
-                                .await
-                                .expect("we never close the semaphore");
-                            (permit, None)
-                        }
+        let (permit, output) = match Arc::clone(&self.semaphore)
+            .try_acquire_owned()
+        {
+            Ok(permit) => (permit, None),
+            Err(TryAcquireError::Closed) => {
+                unreachable!("we never close the semaphore")
+            }
+            Err(TryAcquireError::NoPermits) => {
+                let joined =
+                    unwrap_join_result(self.set.join_next().await.transpose());
+                match joined {
+                    // If another task has completed, let's reuse its
+                    // permit, avoiding a few atomic operations (to drop the
+                    // permit, which increments the semaphore's permit count
+                    // and decrements the `Arc<Semaphore>`'s ref count, and
+                    // then to acquire a new permit, which does the
+                    // inverse...).
+                    Some((permit, output)) => (permit, Some(output)),
+                    // It would be strange to end up here: the call to
+                    // `try_acquire_owned()` should not return `NoPermits`
+                    // unless there was a joined task to consume, but
+                    // somehow, there wasn't one. Nonetheless, let's handle
+                    // that gracefully by acquiring a new one.
+                    None => {
+                        let permit = Arc::clone(&self.semaphore)
+                            .acquire_owned()
+                            .await
+                            .expect("we never close the semaphore");
+                        (permit, None)
                     }
                 }
-            };
+            }
+        };
 
         self.set.spawn(async move {
             let output = future.await;
@@ -226,7 +224,7 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// This method panics if the task returns a JoinError
     pub async fn join_next(&mut self) -> Option<T> {
         self.set.join_next().await.map(|r| {
-            let (_permit, output) = r.expect("Failed to join task");
+            let (_permit, output) = unwrap_join_result(r);
             output
         })
     }
@@ -248,7 +246,7 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// [`join_next`]: Self::join_next
     pub fn try_join_next(&mut self) -> Option<T> {
         self.set.try_join_next().map(|r| {
-            let (_permit, output) = r.expect("Failed to join task");
+            let (_permit, output) = unwrap_join_result(r);
             output
         })
     }
@@ -359,6 +357,13 @@ where
         // exists.
         let upper = Some(self.set.set.len() + lower);
         (lower, upper)
+    }
+}
+
+fn unwrap_join_result<T>(result: Result<T, JoinError>) -> T {
+    match result {
+        Ok(output) => output,
+        Err(err) => std::panic::resume_unwind(err.into_panic()),
     }
 }
 
