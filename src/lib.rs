@@ -85,20 +85,21 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     where
         F: Future<Output = T> + Send + 'static,
     {
-        let (permit, output) = match Arc::clone(&self.semaphore).try_acquire_owned() {
-            Ok(permit) => (permit, None),
-            Err(TryAcquireError::Closed) => {
-                unreachable!("we never close the semaphore")
-            }
-            Err(TryAcquireError::NoPermits) => {
-                let joined = self.join_next().await;
-                let permit = Arc::clone(&self.semaphore)
-                    .acquire_owned()
-                    .await
-                    .expect("we never close the semaphore");
-                (permit, joined)
-            }
-        };
+        let (permit, output) =
+            match Arc::clone(&self.semaphore).try_acquire_owned() {
+                Ok(permit) => (permit, None),
+                Err(TryAcquireError::Closed) => {
+                    unreachable!("we never close the semaphore")
+                }
+                Err(TryAcquireError::NoPermits) => {
+                    let joined = self.join_next().await;
+                    let permit = Arc::clone(&self.semaphore)
+                        .acquire_owned()
+                        .await
+                        .expect("we never close the semaphore");
+                    (permit, joined)
+                }
+            };
 
         self.set.spawn(async move {
             let output = future.await;
@@ -106,10 +107,7 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
             output
         });
 
-        JoinedTasks {
-            next: output,
-            set: self,
-        }
+        JoinedTasks { next: output, set: self }
     }
 
     /// Waits for the next task to complete and return its output.
@@ -118,10 +116,7 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     ///
     /// This method panics if the task returns a JoinError
     pub async fn join_next(&mut self) -> Option<T> {
-        self.set
-            .join_next()
-            .await
-            .map(|r| r.expect("Failed to join task"))
+        self.set.join_next().await.map(|r| r.expect("Failed to join task"))
     }
 
     /// Returns the output of a task that has completed, if there are any such
@@ -138,9 +133,7 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// This method panics if the next completed task has returned a
     /// [`tokio::task::JoinError`].
     pub fn try_join_next(&mut self) -> Option<T> {
-        self.set
-            .try_join_next()
-            .map(|r| r.expect("Joined task has failed"))
+        self.set.try_join_next().map(|r| r.expect("Joined task has failed"))
     }
 
     /// Wait for all remaining tasks to complete and return their output.
@@ -226,12 +219,16 @@ mod test {
                     async move {
                         // How many tasks - including our own - are running right
                         // now?
-                        let watermark = count.fetch_add(1, Ordering::SeqCst) + 1;
+                        let watermark =
+                            count.fetch_add(1, Ordering::SeqCst) + 1;
 
                         // The tasks should all execute for a short but variable
                         // amount of time.
                         let duration_ms = rand::rng().random_range(0..10);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(duration_ms)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            duration_ms,
+                        ))
+                        .await;
 
                         count.fetch_sub(1, Ordering::SeqCst);
 
