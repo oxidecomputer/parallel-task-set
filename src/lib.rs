@@ -224,10 +224,11 @@ where
         // The lower bound is 1 if we have at least one output to return.
         let lower = self.next.is_some() as usize;
         // The upper bound is the number of tasks currently spawned on the
-        // joinset. Because this iterator holds an `&mut` reference to the
+        // joinset, plus `self.next`, whose task has already been removed from
+        // the joinset. Because this iterator holds an `&mut` reference to the
         // JoinSet, we know no new tasks will be spawned while this iterator
         // exists.
-        let upper = Some(self.set.set.len());
+        let upper = Some(self.set.set.len() + lower);
         (lower, upper)
     }
 }
