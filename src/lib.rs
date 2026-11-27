@@ -423,4 +423,44 @@ mod test {
             check_watermark(watermark);
         }
     }
+
+    /// Tests that tests count against the parallelism limit until their outputs
+    /// are consumed. This is a regression test for the behavioral change in PR
+    /// #2.
+    #[tokio::test]
+    async fn test_capacity_not_released_until_drained() {
+        const TASKS: usize = 100;
+        let limit = 4;
+        let mut set = ParallelTaskSet::new_with_parallelism(limit);
+        let mut outputs = Vec::with_capacity(TASKS);
+
+        for i in 0..TASKS {
+            outputs.extend(set.spawn(async move { i }).await);
+            assert!(
+                set.set.len() <= limit,
+                "after spawning task {i}, the ParallelTaskSet holds {} tasks, \
+                 exceeding the desired limit of {limit}",
+                set.set.len(),
+            );
+            // Let the spawned tasks run to completion, so that the set holds
+            // completed tasks whose outputs have not yet been consumed.
+            tokio::task::yield_now().await;
+        }
+
+        let remaining = set.join_remaining().await;
+        assert!(
+            remaining.len() <= limit,
+            "join_remaining returned {} outputs, but at most {limit} tasks \
+             should remain in the ParallelTaskSet",
+            remaining.len(),
+        );
+        outputs.extend(remaining);
+
+        outputs.sort_unstable();
+        assert_eq!(
+            outputs,
+            (0..TASKS).collect::<Vec<_>>(),
+            "every task's output must be returned exactly once",
+        );
+    }
 }
