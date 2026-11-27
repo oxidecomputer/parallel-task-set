@@ -3,13 +3,17 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::task::JoinError;
 use tokio::task::JoinSet;
 
 /// The default number of parallel tasks used by [ParallelTaskSet].
-pub const DEFAULT_MAX_PARALLELISM: usize = 16;
+pub const DEFAULT_MAX_PARALLELISM: NonZeroUsize = match NonZeroUsize::new(16) {
+    Some(n) => n,
+    None => unreachable!(), // 16 != 0 (source: that's just how numbers work)
+};
 
 /// A collection of tokio tasks which execute in parallel on distinct tokio
 /// tasks, up to a user-specified maximum amount of parallelism.
@@ -71,7 +75,8 @@ pub const DEFAULT_MAX_PARALLELISM: usize = 16;
 /// # async fn main() {
 /// use parallel_task_set::ParallelTaskSet;
 ///
-/// let mut tasks = ParallelTaskSet::new_with_parallelism(4);
+/// let limit = NonZeroUsize::new(4).expect("4 != 0");
+/// let mut tasks = ParallelTaskSet::new_with_parallelism(limit);
 /// let mut outputs = Vec::new();
 ///
 /// for i in 0..100 {
@@ -104,6 +109,7 @@ pub const DEFAULT_MAX_PARALLELISM: usize = 16;
 pub struct ParallelTaskSet<T> {
     semaphore: Arc<Semaphore>,
     set: JoinSet<(OwnedSemaphorePermit, T)>,
+    max_parallelism: NonZeroUsize,
 }
 
 impl<T: 'static + Send> Default for ParallelTaskSet<T> {
@@ -122,13 +128,18 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
         Self::new_with_parallelism(DEFAULT_MAX_PARALLELISM)
     }
 
-    /// Creates a new [ParallelTaskSet], with `max_parallism` as the
+    /// Creates a new [ParallelTaskSet], with `max_parallelism` as the
     /// maximum number of tasks to run in parallel.
-    pub fn new_with_parallelism(max_parallism: usize) -> ParallelTaskSet<T> {
-        let semaphore = Arc::new(Semaphore::new(max_parallism));
+    ///
+    /// See [the type-level documentation](ParallelTaskSet#limiting-parallelism)
+    /// for more details.
+    pub fn new_with_parallelism(
+        max_parallelism: NonZeroUsize,
+    ) -> ParallelTaskSet<T> {
+        let semaphore = Arc::new(Semaphore::new(max_parallelism.get()));
         let set = JoinSet::new();
 
-        Self { semaphore, set }
+        Self { semaphore, set, max_parallelism }
     }
 
     /// Spawn the provided `future`, potentially returning the outputs of
@@ -273,6 +284,25 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
         }
         output
     }
+
+    /// Returns the number of tasks currently in this set.
+    pub fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    /// Returns `true` if this set is currently empty.
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
+    /// Returns the maximum number of tasks that may be on this set at any given
+    /// time.
+    ///
+    /// See [the type-level documentation](ParallelTaskSet#limiting-parallelism)
+    /// for more details.
+    pub fn max_parallelism(&self) -> NonZeroUsize {
+        self.max_parallelism
+    }
 }
 
 /// An iterator over the outputs of completed tasks, returned by
@@ -380,7 +410,9 @@ mod test {
         let count = Arc::new(AtomicUsize::new(0));
 
         let task_limit = 16;
-        let mut set = ParallelTaskSet::new_with_parallelism(task_limit);
+        let mut set = ParallelTaskSet::new_with_parallelism(
+            NonZeroUsize::new(task_limit).expect("16 != 0"),
+        );
         let mut i = 0;
 
         let mut check_watermark = |watermark: usize| {
@@ -436,7 +468,9 @@ mod test {
     async fn test_capacity_not_released_until_drained() {
         const TASKS: usize = 100;
         let limit = 4;
-        let mut set = ParallelTaskSet::new_with_parallelism(limit);
+        let mut set = ParallelTaskSet::new_with_parallelism(
+            NonZeroUsize::new(limit).expect("4 != 0"),
+        );
         let mut outputs = Vec::with_capacity(TASKS);
 
         for i in 0..TASKS {
