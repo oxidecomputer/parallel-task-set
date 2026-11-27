@@ -3,13 +3,17 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::task::JoinError;
 use tokio::task::JoinSet;
 
 /// The default number of parallel tasks used by [ParallelTaskSet].
-pub const DEFAULT_MAX_PARALLELISM: usize = 16;
+pub const DEFAULT_MAX_PARALLELISM: NonZeroUsize = match NonZeroUsize::new(16) {
+    Some(n) => n,
+    None => unreachable!(), // 16 != 0 (source: that's just how numbers work)
+};
 
 /// A collection of tokio tasks which execute in parallel on distinct tokio
 /// tasks, up to a user-specified maximum amount of parallelism.
@@ -71,7 +75,8 @@ pub const DEFAULT_MAX_PARALLELISM: usize = 16;
 /// # async fn main() {
 /// use parallel_task_set::ParallelTaskSet;
 ///
-/// let mut tasks = ParallelTaskSet::new_with_parallelism(4);
+/// let limit = NonZeroUsize::new(4).expect("4 != 0");
+/// let mut tasks = ParallelTaskSet::new_with_parallelism(limit);
 /// let mut outputs = Vec::new();
 ///
 /// for i in 0..100 {
@@ -124,8 +129,10 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
 
     /// Creates a new [ParallelTaskSet], with `max_parallism` as the
     /// maximum number of tasks to run in parallel.
-    pub fn new_with_parallelism(max_parallism: usize) -> ParallelTaskSet<T> {
-        let semaphore = Arc::new(Semaphore::new(max_parallism));
+    pub fn new_with_parallelism(
+        max_parallism: NonZeroUsize,
+    ) -> ParallelTaskSet<T> {
+        let semaphore = Arc::new(Semaphore::new(max_parallism.get()));
         let set = JoinSet::new();
 
         Self { semaphore, set }
@@ -379,7 +386,7 @@ mod test {
     async fn test_spawn_many() {
         let count = Arc::new(AtomicUsize::new(0));
 
-        let task_limit = 16;
+        let task_limit = NonZeroUsize::new(16).expect("16 != 0");
         let mut set = ParallelTaskSet::new_with_parallelism(task_limit);
         let mut i = 0;
 
@@ -435,7 +442,7 @@ mod test {
     #[tokio::test]
     async fn test_capacity_not_released_until_drained() {
         const TASKS: usize = 100;
-        let limit = 4;
+        let limit = NonZeroUsize::new(4).expect("4 != 0");
         let mut set = ParallelTaskSet::new_with_parallelism(limit);
         let mut outputs = Vec::with_capacity(TASKS);
 
