@@ -426,7 +426,7 @@ mod test {
 
     /// Tests that tests count against the parallelism limit until their outputs
     /// are consumed. This is a regression test for the behavioral change in PR
-    /// #2.
+    /// #1.
     #[tokio::test]
     async fn test_capacity_not_released_until_drained() {
         const TASKS: usize = 100;
