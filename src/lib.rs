@@ -109,6 +109,7 @@ pub const DEFAULT_MAX_PARALLELISM: NonZeroUsize = match NonZeroUsize::new(16) {
 pub struct ParallelTaskSet<T> {
     semaphore: Arc<Semaphore>,
     set: JoinSet<(OwnedSemaphorePermit, T)>,
+    max_parallelism: NonZeroUsize,
 }
 
 impl<T: 'static + Send> Default for ParallelTaskSet<T> {
@@ -127,15 +128,18 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
         Self::new_with_parallelism(DEFAULT_MAX_PARALLELISM)
     }
 
-    /// Creates a new [ParallelTaskSet], with `max_parallism` as the
+    /// Creates a new [ParallelTaskSet], with `max_parallelism` as the
     /// maximum number of tasks to run in parallel.
+    ///
+    /// See [the type-level documentation](ParallelTaskSet#limiting-parallelism)
+    /// for more details.
     pub fn new_with_parallelism(
-        max_parallism: NonZeroUsize,
+        max_parallelism: NonZeroUsize,
     ) -> ParallelTaskSet<T> {
-        let semaphore = Arc::new(Semaphore::new(max_parallism.get()));
+        let semaphore = Arc::new(Semaphore::new(max_parallelism.get()));
         let set = JoinSet::new();
 
-        Self { semaphore, set }
+        Self { semaphore, set, max_parallelism }
     }
 
     /// Spawn the provided `future`, potentially returning the outputs of
@@ -280,6 +284,25 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
         }
         output
     }
+
+    /// Returns the number of tasks currently in this set.
+    pub fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    /// Returns `true` if this set is currently empty.
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
+    /// Returns the maximum number of tasks that may be on this set at any given
+    /// time.
+    ///
+    /// See [the type-level documentation](ParallelTaskSet#limiting-parallelism)
+    /// for more details.
+    pub fn max_parallelism(&self) -> NonZeroUsize {
+        self.max_parallelism
+    }
 }
 
 /// An iterator over the outputs of completed tasks, returned by
@@ -386,8 +409,10 @@ mod test {
     async fn test_spawn_many() {
         let count = Arc::new(AtomicUsize::new(0));
 
-        let task_limit = NonZeroUsize::new(16).expect("16 != 0");
-        let mut set = ParallelTaskSet::new_with_parallelism(task_limit);
+        let task_limit = 16;
+        let mut set = ParallelTaskSet::new_with_parallelism(
+            NonZeroUsize::new(task_limit).expect("16 != 0"),
+        );
         let mut i = 0;
 
         let mut check_watermark = |watermark: usize| {
@@ -442,8 +467,10 @@ mod test {
     #[tokio::test]
     async fn test_capacity_not_released_until_drained() {
         const TASKS: usize = 100;
-        let limit = NonZeroUsize::new(4).expect("4 != 0");
-        let mut set = ParallelTaskSet::new_with_parallelism(limit);
+        let limit = 4;
+        let mut set = ParallelTaskSet::new_with_parallelism(
+            NonZeroUsize::new(limit).expect("4 != 0"),
+        );
         let mut outputs = Vec::with_capacity(TASKS);
 
         for i in 0..TASKS {
