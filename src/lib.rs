@@ -81,25 +81,24 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// [`join_next()`]: Self::join_next
     #[must_use = "ParallelTaskSet::spawn returns a task output once \
         `max_parallelism` tasks are spawned"]
-    pub async fn spawn<F>(&mut self, future: F) -> Option<T>
+    pub async fn spawn<F>(&mut self, future: F) -> JoinedTasks<'_, T>
     where
         F: Future<Output = T> + Send + 'static,
     {
-        let (permit, output) =
-            match Arc::clone(&self.semaphore).try_acquire_owned() {
-                Ok(permit) => (permit, None),
-                Err(TryAcquireError::Closed) => {
-                    unreachable!("we never close the semaphore")
-                }
-                Err(TryAcquireError::NoPermits) => {
-                    let joined = self.join_next().await;
-                    let permit = Arc::clone(&self.semaphore)
-                        .acquire_owned()
-                        .await
-                        .expect("we never close the semaphore");
-                    (permit, joined)
-                }
-            };
+        let (permit, output) = match Arc::clone(&self.semaphore).try_acquire_owned() {
+            Ok(permit) => (permit, None),
+            Err(TryAcquireError::Closed) => {
+                unreachable!("we never close the semaphore")
+            }
+            Err(TryAcquireError::NoPermits) => {
+                let joined = self.join_next().await;
+                let permit = Arc::clone(&self.semaphore)
+                    .acquire_owned()
+                    .await
+                    .expect("we never close the semaphore");
+                (permit, joined)
+            }
+        };
 
         self.set.spawn(async move {
             let output = future.await;
@@ -107,7 +106,10 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
             output
         });
 
-        output
+        JoinedTasks {
+            next: output,
+            set: self,
+        }
     }
 
     /// Waits for the next task to complete and return its output.
@@ -116,7 +118,29 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     ///
     /// This method panics if the task returns a JoinError
     pub async fn join_next(&mut self) -> Option<T> {
-        self.set.join_next().await.map(|r| r.expect("Failed to join task"))
+        self.set
+            .join_next()
+            .await
+            .map(|r| r.expect("Failed to join task"))
+    }
+
+    /// Returns the output of a task that has completed, if there are any such
+    /// tasks.
+    ///
+    /// Unlike [`join_next`], this method does not wait for a task to complete
+    /// if no tasks have completed.
+    ///
+    /// Returns `None` if no tasks have completed, or if the [`ParallelTaskSet`]
+    /// is empty.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the next completed task has returned a
+    /// [`tokio::task::JoinError`].
+    pub fn try_join_next(&mut self) -> Option<T> {
+        self.set
+            .try_join_next()
+            .map(|r| r.expect("Joined task has failed"))
     }
 
     /// Wait for all remaining tasks to complete and return their output.
@@ -130,6 +154,41 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// This method panics any of the tasks return a JoinError
     pub async fn join_remaining(self) -> Vec<T> {
         self.set.join_all().await
+    }
+}
+
+#[must_use = "dropping a `JoinedTasks` without consuming the output of the \
+    completed tasks will reduce the available capacity of the task set until \
+    those tasks' output is consumed"]
+pub struct JoinedTasks<'set, T> {
+    next: Option<T>,
+    set: &'set mut ParallelTaskSet<T>,
+}
+
+impl<'set, T> JoinedTasks<'set, T>
+where
+    T: Send + 'static,
+{
+    /// Discard the output of all currently-completed tasks on the
+    /// [`ParallelTaskSet`], freeing up capacity for additional tasks to be
+    /// spawned.
+    ///
+    /// This is particularly useful when the output type of the futures spawned
+    /// on the [`ParallelTaskSet`] is `()`, and the caller does not wish to
+    /// explicitly loop over this iterator to consume a whole bunch of nothing.
+    pub fn discard(self) {
+        for _ in self {}
+    }
+}
+
+impl<'set, T> Iterator for JoinedTasks<'set, T>
+where
+    T: Send + 'static,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next.take().or_else(|| self.set.try_join_next())
     }
 }
 
@@ -161,22 +220,18 @@ mod test {
         };
 
         for _ in 0..task_limit * 10 {
-            let prev = set
+            let completed = set
                 .spawn({
                     let count = count.clone();
                     async move {
                         // How many tasks - including our own - are running right
                         // now?
-                        let watermark =
-                            count.fetch_add(1, Ordering::SeqCst) + 1;
+                        let watermark = count.fetch_add(1, Ordering::SeqCst) + 1;
 
                         // The tasks should all execute for a short but variable
                         // amount of time.
                         let duration_ms = rand::rng().random_range(0..10);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(
-                            duration_ms,
-                        ))
-                        .await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(duration_ms)).await;
 
                         count.fetch_sub(1, Ordering::SeqCst);
 
@@ -184,8 +239,8 @@ mod test {
                     }
                 })
                 .await;
-            if let Some(watermark) = prev {
-                check_watermark(watermark);
+            for task in completed {
+                check_watermark(task);
             }
         }
 
