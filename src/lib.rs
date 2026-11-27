@@ -157,7 +157,7 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// [`tokio::task::JoinError`].
     pub fn try_join_next(&mut self) -> Option<T> {
         self.set.try_join_next().map(|r| {
-            let (_permit, output) = r.expect("Joined task has failed");
+            let (_permit, output) = r.expect("Failed to join task");
             output
         })
     }
