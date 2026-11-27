@@ -4,7 +4,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::{Semaphore, TryAcquireError};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::task::JoinSet;
 
 /// The default number of parallel tasks used by [ParallelTaskSet].
@@ -33,7 +33,7 @@ pub const DEFAULT_MAX_PARALLELISM: usize = 16;
 /// respects a parallism capacity.
 pub struct ParallelTaskSet<T> {
     semaphore: Arc<Semaphore>,
-    set: JoinSet<T>,
+    set: JoinSet<(OwnedSemaphorePermit, T)>,
 }
 
 impl<T: 'static + Send> Default for ParallelTaskSet<T> {
@@ -92,19 +92,39 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
                     unreachable!("we never close the semaphore")
                 }
                 Err(TryAcquireError::NoPermits) => {
-                    let joined = self.join_next().await;
-                    let permit = Arc::clone(&self.semaphore)
-                        .acquire_owned()
+                    let joined = self
+                        .set
+                        .join_next()
                         .await
-                        .expect("we never close the semaphore");
-                    (permit, joined)
+                        .transpose()
+                        .expect("Failed to join task");
+                    match joined {
+                        // If another task has completed, let's reuse its
+                        // permit, avoiding a few atomic operations (to drop the
+                        // permit, which increments the semaphore's permit count
+                        // and decrements the `Arc<Semaphore>`'s ref count, and
+                        // then to acquire a new permit, which does the
+                        // inverse...).
+                        Some((permit, output)) => (permit, Some(output)),
+                        // It would be strange to end up here: the call to
+                        // `try_acquire_owned()` should not return `NoPermits`
+                        // unless there was a joined task to consume, but
+                        // somehow, there wasn't one. Nonetheless, let's handle
+                        // that gracefully by acquiring a new one.
+                        None => {
+                            let permit = Arc::clone(&self.semaphore)
+                                .acquire_owned()
+                                .await
+                                .expect("we never close the semaphore");
+                            (permit, None)
+                        }
+                    }
                 }
             };
 
         self.set.spawn(async move {
             let output = future.await;
-            drop(permit);
-            output
+            (permit, output)
         });
 
         JoinedTasks { next: output, set: self }
@@ -116,7 +136,10 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     ///
     /// This method panics if the task returns a JoinError
     pub async fn join_next(&mut self) -> Option<T> {
-        self.set.join_next().await.map(|r| r.expect("Failed to join task"))
+        self.set.join_next().await.map(|r| {
+            let (_permit, output) = r.expect("Failed to join task");
+            output
+        })
     }
 
     /// Returns the output of a task that has completed, if there are any such
@@ -133,7 +156,10 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// This method panics if the next completed task has returned a
     /// [`tokio::task::JoinError`].
     pub fn try_join_next(&mut self) -> Option<T> {
-        self.set.try_join_next().map(|r| r.expect("Joined task has failed"))
+        self.set.try_join_next().map(|r| {
+            let (_permit, output) = r.expect("Joined task has failed");
+            output
+        })
     }
 
     /// Wait for all remaining tasks to complete and return their output.
@@ -145,8 +171,18 @@ impl<T: 'static + Send> ParallelTaskSet<T> {
     /// # Panics
     ///
     /// This method panics any of the tasks return a JoinError
-    pub async fn join_remaining(self) -> Vec<T> {
-        self.set.join_all().await
+    pub async fn join_remaining(mut self) -> Vec<T> {
+        // N.B. that this does not use `JoinSet::join_all`, because that
+        // function returns a `Vec` of each task's output. If we were to use
+        // that here, we would need to drain that vec and then allocate a new
+        // one, just to get rid of the permits that each task outputs alongside
+        // their actual output. By looping ourselves, we avoid the superfluous
+        // allocation.
+        let mut output = Vec::with_capacity(self.set.len());
+        while let Some(task) = self.join_next().await {
+            output.push(task);
+        }
+        output
     }
 }
 
